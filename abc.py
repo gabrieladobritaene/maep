@@ -477,6 +477,60 @@ def analyze(raw):
     quality["celule_counts"] = (cells_df["Problemă"].value_counts() if len(cells_df)
                                 else pd.Series(dtype=int))
 
+    # 5) ANALIZA DETALIATĂ A COLOANEI AG (Sold cont) — verificăm fiecare PAS al soldului
+    if cols["sold"] is not None:
+        sd_letter = _xl_col(cols["sold"])
+        st_v = pd.to_numeric(tx.iloc[:, cols["sold"]], errors="coerce").values
+        mov_v = movement.values
+        prim_v, ven_v = primit.values, venit.values
+        chel_v, tr_v = row_cheltuit.values, transferat.values
+        ex_rows_ag = [int(i) + hdr + 2 for i in tx.index]
+        furn_v = (tx.iloc[:, furn_idx].map(lambda v: "" if pd.isna(v) else str(v).strip()).values
+                  if furn_idx is not None else [""] * len(tx))
+        ag_rows = []
+        prev = float(opening)
+        for k in range(len(st_v)):
+            ag, mv = st_v[k], float(mov_v[k])
+            expected = prev + mv
+            data_k = tx_dates.iloc[k].date() if pd.notna(tx_dates.iloc[k]) else None
+            base = [f"{sd_letter}{ex_rows_ag[k]}", int(ex_rows_ag[k]), data_k, str(furn_v[k]),
+                    round(prev, 2), round(float(prim_v[k]), 2), round(float(ven_v[k]), 2),
+                    round(float(chel_v[k]), 2), round(float(tr_v[k]), 2), round(mv, 2),
+                    round(expected, 2)]
+            if np.isnan(ag):
+                ag_rows.append(base + [None, None, None,
+                                       "Sold cont GOL — formulă lipsă (ar fi trebuit să fie soldul precedent + mișcarea rândului)"])
+                prev = expected
+                continue
+            delta = ag - prev
+            step = ag - expected
+            if abs(step) <= 0.01:
+                prob = ""
+            elif abs(mv) < 0.01 and abs(delta) > 0.01:
+                prob = "Soldul s-a modificat deși rândul nu are nicio mișcare de bani"
+            elif abs(delta) < 0.01 and abs(mv) > 0.01:
+                prob = "Rândul are mișcare de bani, dar soldul a rămas neschimbat"
+            else:
+                prob = "Pasul soldului nu se potrivește cu mișcarea rândului"
+            ag_rows.append(base + [round(float(ag), 2), round(float(delta), 2), round(float(step), 2), prob])
+            prev = float(ag)
+
+        ag_detail = pd.DataFrame(ag_rows, columns=[
+            "Celulă", "Rând", "Data", "Furnizor", "Sold precedent", "Primit", "Venituri",
+            "Cheltuit", "Transferat", "Mișcare rând", "Sold așteptat",
+            "Sold scris (AG)", "Pas real (Δ)", "Eroare pas", "Problemă"])
+        ag_problems = ag_detail[ag_detail["Problemă"] != ""].reset_index(drop=True)
+        first_bad = ag_problems.iloc[0].to_dict() if len(ag_problems) else None
+        quality["ag"] = {
+            "detail": ag_detail,
+            "problems": ag_problems,
+            "counts": (ag_problems["Problemă"].value_counts() if len(ag_problems) else pd.Series(dtype=int)),
+            "n_total": int(len(ag_detail)),
+            "n_problem": int(len(ag_problems)),
+            "first_bad": first_bad,
+            "sold_letter": sd_letter,
+        }
+
     return {
         "header_row": hdr, "cols": cols, "date_idx": date_idx,
         "raw": raw,
@@ -1236,8 +1290,13 @@ def render_report(st, res):
 
     st.divider()
 
-    # ---- 8. EXPORT ----
-    st.header("8. Descarcă rezumatul")
+    # ---- 8. COLOANA AG (SOLD CONT) — ANALIZĂ DETALIATĂ ----
+    render_ag(st, res)
+
+    st.divider()
+
+    # ---- 9. EXPORT ----
+    st.header("9. Descarcă rezumatul")
     st.caption("Un fișier Excel curat, cu totalurile corecte (sumar, pe categorii, pe luni, pe furnizor).")
     st.download_button(
         "⬇️ Descarcă rezumat Excel",
@@ -1579,6 +1638,72 @@ def render_reconcile(st, report, bank):
     st.download_button("⬇️ Descarcă raportul de diferențe pe zi (CSV)",
                        data=dd["full"].to_csv(index=False).encode("utf-8-sig"),
                        file_name="diferente_pe_zi.csv", mime="text/csv", key="dl_difzi")
+
+
+def render_ag(st, res):
+    ag = res.get("quality", {}).get("ag")
+    st.header("8. Coloana AG (Sold cont) — toate problemele, explicate")
+    if ag is None:
+        st.info("Nu am găsit coloana „Sold cont”, deci nu pot analiza coloana AG.")
+        return
+
+    st.markdown(
+        "Soldul de pe fiecare rând **ar trebui** să fie întotdeauna: "
+        "`soldul de pe rândul precedent + (Primit + Venituri − Cheltuit − Transferat) de pe rândul curent`. "
+        "Aici verificăm **fiecare pas** în parte, ca să vedem exact pe ce rânduri soldul scris în fișier "
+        "nu se potrivește cu mișcarea de bani de pe acel rând."
+    )
+    st.caption("Spre deosebire de verificarea soldului din secțiunea 7 (care compară cu soldul recalculat total și "
+               "de aceea marchează și rândurile care doar moștenesc o eroare veche), aici izolăm exact rândurile "
+               "care **introduc** o problemă nouă.")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Rânduri cu sold analizate", f"{ag['n_total']}")
+    c2.metric("Rânduri cu pas greșit", f"{ag['n_problem']}")
+    c3.metric("Rânduri corecte", f"{ag['n_total'] - ag['n_problem']}")
+
+    if ag["n_problem"] == 0:
+        st.success("Fiecare pas al soldului se potrivește cu mișcarea rândului — coloana AG e coerentă.")
+    else:
+        fb = ag["first_bad"]
+        if fb:
+            st.warning(
+                f"Prima problemă apare la **{fb['Celulă']}** (rândul {fb['Rând']}): soldul precedent era "
+                f"{_fmt(fb['Sold precedent'])}, mișcarea rândului este {_fmt(fb['Mișcare rând'])}, deci soldul "
+                f"așteptat ar fi **{_fmt(fb['Sold așteptat'])}**, dar în fișier scrie **{_fmt(fb['Sold scris (AG)'])}** "
+                f"→ {fb['Problemă'].lower()}."
+            )
+        st.markdown("**Pe tip de problemă:**")
+        st.dataframe(ag["counts"].rename_axis("Problemă").reset_index(name="Nr. rânduri"),
+                     use_container_width=True, hide_index=True)
+
+        numcols = ["Sold precedent", "Primit", "Venituri", "Cheltuit", "Transferat",
+                   "Mișcare rând", "Sold așteptat", "Sold scris (AG)", "Pas real (Δ)", "Eroare pas"]
+        st.markdown("**Toate rândurile cu pas de sold greșit** "
+                    "(vezi soldul precedent, mișcarea rândului defalcată, soldul așteptat și cel scris):")
+        prob = ag["problems"]
+        st.dataframe(
+            prob.head(1000).style.format({c: "{:,.2f}" for c in numcols}, na_rep="(gol)")
+                .map(lambda x: "color:#c00;font-weight:600" if isinstance(x, (int, float)) and abs(x) > 0.01 else "",
+                     subset=["Eroare pas"]),
+            use_container_width=True, hide_index=True,
+        )
+        st.download_button("⬇️ Descarcă toate rândurile cu pas de sold greșit (CSV)",
+                           data=prob.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="ag_pasi_gresiti.csv", mime="text/csv", key="dl_ag_steps")
+
+    with st.expander(f"Vezi analiza completă a coloanei AG (toate cele {ag['n_total']} rânduri, pas cu pas)"):
+        numcols = ["Sold precedent", "Primit", "Venituri", "Cheltuit", "Transferat",
+                   "Mișcare rând", "Sold așteptat", "Sold scris (AG)", "Pas real (Δ)", "Eroare pas"]
+        st.dataframe(
+            res["quality"]["ag"]["detail"].style.format({c: "{:,.2f}" for c in numcols}, na_rep="(gol)")
+                .map(lambda x: "color:#c00;font-weight:600" if isinstance(x, (int, float)) and abs(x) > 0.01 else "",
+                     subset=["Eroare pas"]),
+            use_container_width=True, hide_index=True,
+        )
+        st.download_button("⬇️ Descarcă analiza completă AG, pas cu pas (CSV)",
+                           data=res["quality"]["ag"]["detail"].to_csv(index=False).encode("utf-8-sig"),
+                           file_name="ag_analiza_completa.csv", mime="text/csv", key="dl_ag_full")
 
 
 def main():
