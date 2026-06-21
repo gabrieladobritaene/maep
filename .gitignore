@@ -1,0 +1,30 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Logs / temp
+*.log
+st*.log
+
+# Date locale (nu urcăm fișierele Excel cu date reale)
+*.xls
+*.xlsx
+*.csv
+
+# OS
+.DS_Store
+Thumbs.db
