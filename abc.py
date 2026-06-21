@@ -184,6 +184,11 @@ def analyze(raw):
     cat_tot = cat_matrix.sum(axis=0)
     cat_tot = cat_tot[cat_tot != 0].sort_values(ascending=False)
     total_cheltuit = float(row_cheltuit.sum())
+    fees_report = 0.0
+    for nm in cat_matrix.columns:
+        n = _norm(nm)
+        if "com" in n and "banc" in n:
+            fees_report += float(cat_matrix[nm].sum())
     cat_table = pd.DataFrame({
         "Categorie": cat_tot.index,
         "Total (lei)": cat_tot.values,
@@ -539,6 +544,7 @@ def analyze(raw):
         "period_min": tx_dates.min(), "period_max": tx_dates.max(),
         "opening": opening, "opening_source": opening_source,
         "total_cheltuit": total_cheltuit,
+        "fees_report": fees_report,
         "total_primit": float(primit.sum()),
         "total_venit": float(venit.sum()),
         "total_transferat": float(transferat.sum()),
@@ -1576,6 +1582,47 @@ def render_reconcile(st, report, bank):
             {c: "{:,.2f}" for c in ["Sumă (lei)", "Sold AG (raport)", "Sold real (bancă)", "Diferență sold"]
              if c in rp["matches"].columns}, na_rep="—"),
             use_container_width=True, hide_index=True)
+
+    # ---- Ce lipsește din extras în raport ----
+    st.divider()
+    st.subheader("Ce lipsește din extras în raport")
+    st.caption("Extrasul arată banii care chiar au intrat/ieșit din cont. Aici scoatem în evidență ce mișcare "
+               "reală din bancă NU se regăsește în raport — plăți negăsite, comisioane neînregistrate și încasări lipsă.")
+
+    bu = rp["bank_unmatched"]
+    bu_total = float(pd.to_numeric(bu["Sumă (lei)"], errors="coerce").sum()) if len(bu) else 0.0
+    fees_missing = bank["fees"] - report.get("fees_report", 0.0)
+    out_diff = bank["total_debit"] - (report["total_cheltuit"] + report["total_transferat"])
+    in_diff = bank["total_credit"] - (report["total_primit"] + report["total_venit"])
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Plăți din bancă lipsă din raport", f"{len(bu)}", delta=f"{bu_total:,.2f} lei", delta_color="off")
+    k2.metric("Comisioane neînregistrate în raport", _fmt(fees_missing))
+    k3.metric("Total ieșiri nereflectate", _fmt(out_diff))
+
+    # comisioane
+    if abs(fees_missing) > 0.01:
+        st.warning(f"**Comisioane/speze bancare:** în extras = {_fmt(bank['fees'])}, în raport (categoria «com. bancare») "
+                   f"= {_fmt(report.get('fees_report', 0.0))} → în raport **lipsesc {_fmt(fees_missing)}** în comisioane.")
+    else:
+        st.success(f"Comisioanele din raport ({_fmt(report.get('fees_report', 0.0))}) coincid cu spezele din extras.")
+
+    # plăți negăsite
+    if len(bu):
+        st.markdown(f"**{len(bu)} plăți există în extras dar nu le găsesc în raport** (total {_fmt(bu_total)}):")
+        st.dataframe(bu.style.format({"Sumă (lei)": "{:,.2f}"}),
+                     use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Descarcă plățile din extras lipsă din raport (CSV)",
+                           data=bu.to_csv(index=False).encode("utf-8-sig"),
+                           file_name="extras_lipsa_din_raport.csv", mime="text/csv", key="dl_missing")
+    else:
+        st.success("Toate plățile din extras au corespondent în raport.")
+
+    # încasări
+    if abs(in_diff) > 0.01:
+        st.info(f"**Încasări:** în extras au intrat {_fmt(bank['total_credit'])}, iar raportul înregistrează "
+                f"{_fmt(report['total_primit'] + report['total_venit'])} (primit + venituri) → diferență de "
+                f"{_fmt(in_diff)} pe partea de intrări.")
 
     # ---- Verificarea soldului AG față de extras ----
     sc = rp.get("sold_check")
